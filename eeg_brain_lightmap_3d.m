@@ -22,31 +22,28 @@ x = coords(:,1);
 y = coords(:,2);
 z = coords(:,3);
 
-regions = {
-    'Left Frontal',     {'Fp1','F3','F7'}
-    'Right Frontal',    {'Fp2','F4','F8'}
-    'Midline Frontal',  {'Fz','AFz'}
-    'Left Central',     {'FC3','C3','CP3'}
-    'Right Central',    {'FC4','C4','CP4'}
-    'Midline Central',  {'Cz'}
-    'Left Parietal',    {'P3','P7'}
-    'Right Parietal',   {'P4','P8'}
-    'Midline Parietal', {'Pz'}
-    'Left Temporal',    {'T7','FT7'}
-    'Right Temporal',   {'T8','FT8'}
-    'Left Occipital',   {'O1','PO3'}
-    'Right Occipital',  {'O2','PO4'}
-    'Midline Occipital',{'Oz'}
-    'Left FC',          {'FC5','F5'}
-    'Right FC',         {'FC6','F6'}
-    };
+fid = fopen('regions.json');
+raw = fread(fid, inf);
+str = char(raw');
+fclose(fid);
+
+regionsStruct = jsondecode(str);
+
+fields = fieldnames(regionsStruct);
+regions = cell(length(fields), 2);
+
+for i = 1:length(fields)
+    regions{i,1} = fields{i};
+    regions{i,2} = regionsStruct.(fields{i});
+end
+
 
 
 % --- EEG structure ---
 EEG.srate = 500;
 EEG.data  = zeros(numel(labels), 500);
 EEG.chanlocs = struct('labels', labels, ...
-                      'X', num2cell(x), 'Y', num2cell(y), 'Z', num2cell(z));
+    'X', num2cell(x), 'Y', num2cell(y), 'Z', num2cell(z));
 
 fprintf('[3DLightmap] Streaming... press Ctrl+C to stop.\n');
 
@@ -70,19 +67,19 @@ noseY = 1.02;
 noseX = [-nose_base/2, 0, nose_base/2];
 noseZ = [0.05, 0.1, 0.05];
 patch('XData',noseX, 'YData',[noseY, noseY+nose_height, noseY], ...
-      'ZData',noseZ, 'FaceColor',[0.3 0.3 0.3], 'EdgeColor','k', 'LineWidth',1.5);
+    'ZData',noseZ, 'FaceColor',[0.3 0.3 0.3], 'EdgeColor','k', 'LineWidth',1.5);
 
 % --- Plot channels as spheres with labels ---
 Nch = numel(labels);
 h = gobjects(1,Nch);
 for i = 1:Nch
     h(i) = plot3(ax, x(i), y(i), z(i), 'o', ...
-                 'MarkerSize',10, 'MarkerEdgeColor','k', 'MarkerFaceColor',[1 1 1]);
+        'MarkerSize',10, 'MarkerEdgeColor','k', 'MarkerFaceColor',[1 1 1]);
     text(x(i), y(i), z(i)+0.05, labels{i}, 'FontSize',7, ...
-         'HorizontalAlignment','center', 'Color','k');
+        'HorizontalAlignment','center', 'Color','k');
 end
 title(ax, sprintf('Real-Time %s Band Power (3D)', upper(band)), ...
-      'Color','k','FontSize',13,'Units','normalized','Position',[0.5,1.05,0]);
+    'Color','k','FontSize',13,'Units','normalized','Position',[0.5,1.05,0]);
 
 light('Position',[1 1 1],'Style','infinite');
 material shiny;

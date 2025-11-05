@@ -9,24 +9,20 @@ try, bv_rda_client('close'); end
 S = bv_rda_client('open','127.0.0.1',51244,32,500);
 
 % --- Region layout (same as before) ---
-regions = {
-    'Left Frontal',     {'Fp1','F3','F7'}
-    'Right Frontal',    {'Fp2','F4','F8'}
-    'Midline Frontal',  {'Fz','AFz'}
-    'Left Central',     {'FC3','C3','CP3'}
-    'Right Central',    {'FC4','C4','CP4'}
-    'Midline Central',  {'Cz'}
-    'Left Parietal',    {'P3','P7'}
-    'Right Parietal',   {'P4','P8'}
-    'Midline Parietal', {'Pz'}
-    'Left Temporal',    {'T7','FT7'}
-    'Right Temporal',   {'T8','FT8'}
-    'Left Occipital',   {'O1','PO3'}
-    'Right Occipital',  {'O2','PO4'}
-    'Midline Occipital',{'Oz'}
-    'Left FC',          {'FC5','F5'}
-    'Right FC',         {'FC6','F6'}
-    };
+fid = fopen('regions.json');
+raw = fread(fid, inf);
+str = char(raw');
+fclose(fid);
+
+regionsStruct = jsondecode(str);
+
+fields = fieldnames(regionsStruct);
+regions = cell(length(fields), 2);
+
+for i = 1:length(fields)
+    regions{i,1} = fields{i};
+    regions{i,2} = regionsStruct.(fields{i});
+end
 
 nR = size(regions,1);
 
