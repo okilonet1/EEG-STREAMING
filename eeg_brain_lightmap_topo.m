@@ -5,7 +5,7 @@ function eeg_brain_lightmap_topo(band)
 if nargin < 1, band = 'alpha'; end
 
 try, bv_rda_client('close'); end
-S = bv_rda_client('open','169.254.230.22',51244,32,500);
+S = bv_rda_client('open','127.0.0.1',51244,32,500);
 
 % --- Load channel coordinates (.sfp file) ---
 fid = fopen('channel_locations.sfp','r');

@@ -1,19 +1,40 @@
 function [regionBandPower, regionColors] = eeg_region_bandpower(EEG)
-% EEG_REGION_BANDPOWER - Compute normalized bandpower per brain region
-% and return RGB color encodings.
+% EEG_REGION_BANDPOWER
+% Compute normalized regional bandpower after minimal preprocessing
+% and return RGB color encodings for visualization.
+%
+% Usage:
+%   [regionBandPower, regionColors] = eeg_region_bandpower(EEG)
+%
+%   EEG - EEGLAB EEG structure with fields:
+%         EEG.data  [channels x samples]
+%         EEG.srate (sampling frequency)
+%         EEG.chanlocs.labels (channel names)
+%
+%   regionBandPower.(band) - normalized power values per region
+%   regionColors.(band)    - corresponding RGB color map per region
 
 % ----------------------------------------------------
-fid = fopen('regions.json');
-raw = fread(fid, inf);
-str = char(raw');
-fclose(fid);
+% --- Reset persistent variables when EEG struct has no data ---
+persistent smoothVals_perBand
+if nargin == 0
+    clear smoothVals_perBand
+    return
+end
 
-regionsStruct = jsondecode(str);
+alpha = 0.3;  % smoothing factor (0 = no smoothing, 1 = immediate)
+
+% --- Load region definitions ---
+fid = fopen('regions.json','r');
+if fid < 0, error('regions.json not found in current directory.'); end
+raw = fread(fid, inf);
+fclose(fid);
+regionsStruct = jsondecode(char(raw'));
 
 fields = fieldnames(regionsStruct);
-regions = cell(length(fields), 2);
-
-for i = 1:length(fields)
+nR = numel(fields);
+regions = cell(nR,2);
+for i = 1:nR
     regions{i,1} = fields{i};
     regions{i,2} = regionsStruct.(fields{i});
 end
@@ -26,16 +47,37 @@ bands = struct( ...
     'gamma',[30 45]);
 
 % ----------------------------------------------------
-if isstruct(EEG)
-    data = double(EEG.data);
-    fs = EEG.srate;
-    labels = upper(cellstr(string({EEG.chanlocs.labels})));
-else
-    error('Input must be an EEGLAB EEG struct.');
+% --- Validate EEG input ---
+if ~isstruct(EEG) || ~isfield(EEG,'data') || ~isfield(EEG,'srate')
+    error('Input must be a valid EEGLAB EEG struct with .data and .srate fields');
 end
 
+data = double(EEG.data);
+fs = EEG.srate;
+labels = upper(string({EEG.chanlocs.labels}));
+
+% ----------------------------------------------------
+% --- LIGHT PREPROCESSING PIPELINE ---
+% Common average reference
+data = data - mean(data,1);
+
+% Apply high-pass, notch, and low-pass filters (reuse designed filters)
+persistent hp notch lp
+if isempty(hp)
+    hp = designfilt('highpassiir','FilterOrder',4, ...
+        'HalfPowerFrequency',0.5,'SampleRate',fs);
+    notch = designfilt('bandstopiir','FilterOrder',4, ...
+        'HalfPowerFrequency1',59,'HalfPowerFrequency2',61,'SampleRate',fs);
+    lp = designfilt('lowpassiir','FilterOrder',4, ...
+        'HalfPowerFrequency',45,'SampleRate',fs);
+end
+data = filtfilt(hp, data')';
+data = filtfilt(notch, data')';
+data = filtfilt(lp, data')';
+
+% ----------------------------------------------------
+% --- BANDPOWER COMPUTATION ---
 bandNames = fieldnames(bands);
-nR = numel(regions(:,1));
 regionBandPower = struct();
 regionColors = struct();
 
@@ -45,7 +87,7 @@ for b = 1:numel(bandNames)
     vals = nan(1,nR);
 
     for r = 1:nR
-        chans = upper(regions{r,2});
+        chans = upper(string(regions{r,2}));
         idx = find(ismember(labels,chans));
         if isempty(idx), continue; end
 
@@ -57,20 +99,31 @@ for b = 1:numel(bandNames)
         vals(r) = p / numel(idx);
     end
 
-    % Normalize
-    if all(isnan(vals))
-        vals(:) = 0;
+    % Normalize across regions
+    if all(isnan(vals)), vals(:) = 0;
     else
         vals = vals - min(vals,[],'omitnan');
         vals = vals ./ max(vals,[],'omitnan');
     end
 
+    % --- Smoothing ---
+    if isempty(smoothVals_perBand) || numel(smoothVals_perBand) ~= nR
+        smoothVals_perBand = vals;
+    else
+        smoothVals_perBand = alpha*vals + (1-alpha)*smoothVals_perBand;
+    end
+    vals = smoothVals_perBand;
+
+    % Save results
     regionBandPower.(band) = vals(:)';
+
+    % Assign colors using jet colormap
     cmap = jet(256);
     regionColors.(band) = interp1(linspace(0,1,256), cmap, vals, 'linear','extrap');
 end
 
-% Optional visualization only if no output requested
+% ----------------------------------------------------
+% --- Visualization (if no output requested) ---
 if nargout == 0
     figure('Color','w','Position',[100 100 800 400]);
     for b = 1:numel(bandNames)
