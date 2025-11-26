@@ -29,7 +29,7 @@ port    = 51244;
 nCh     = 32;                % number of channels expected from RDA
 
 % MCU config (only used if ENABLE_MCU = true)
-mcuPort = "/dev/cu.EEG-ESP32";  % change for your system
+mcuPort = "/";  % change for your system
 mcuBaud = 115200;
 
 %% --- Connect to BrainVision RDA ---
@@ -243,15 +243,8 @@ while true
 
     %% 7) Stream to MCU (16 regions)
     if ENABLE_MCU && ~isempty(mcu)
-        send_to_mcu(mcu, rgbRegion);
-
-        % Non-blocking debug read
-        while mcu.NumBytesAvailable > 0
-            line = readline(mcu);
-            disp("ESP32: " + string(line));
-        end
+        send_to_mcu(mcu, rgbRegion);   % <<--- uses helper
     end
-
 
     drawnow limitrate nocallbacks;
 end
