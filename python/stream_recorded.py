@@ -13,7 +13,8 @@ MARKERS = 0
 
 # ---- Load EEG text file ----
 # Expected format: [nSamples x nChannels] (or with time column first)
-fname = "../data/EEG_export.txt"
+fname = "data/EEG_export.txt"
+
 data = np.loadtxt(fname)
 
 # If first column is time, drop it
