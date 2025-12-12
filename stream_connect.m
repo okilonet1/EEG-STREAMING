@@ -6,27 +6,36 @@
 %   - Show 2D topographic per-channel map
 %   - Show 3D per-channel brain
 %   - Optionally stream region colors to NodeMCU / ESP
+%   - Show raw, unprocessed EEG scope (stacked traces)
+%   - Allow per-channel group selection (1–8, 9–16, etc.) for raw + monitor
 
 clear; close all; clc;
 
 % --- Ensure helper + viz functions are on the path ---
 addpath('functions');
 
+% --- Globals for UI channel selection ---
+global RAW_CH_GROUP MON_CH_GROUP NCH_GLOBAL
+
 %% --- CONFIGURATION ---
 
 % Enable / disable modules
-ENABLE_MONITOR     = true;   % simple 2-panel monitor
-ENABLE_REGION_MAP  = true;   % 16-region bubble map
-ENABLE_TOPO        = true;   % 2D per-channel head
-ENABLE_3D          = false;  % 3D per-channel head
-ENABLE_MCU         = true;   % stream 16-region colors to NodeMCU / ESP
+ENABLE_MONITOR     = true;    % simple 2-panel monitor (existing)
+ENABLE_REGION_MAP  = false;   % 16-region bubble map
+ENABLE_TOPO        = false;   % 2D per-channel head
+ENABLE_3D          = false;   % 3D per-channel head
+ENABLE_MCU         = true;    % stream 16-region colors to NodeMCU / ESP
 
-band    = 'alpha';           % band to visualize
-pullDur = 1;                 % seconds per pull
-fs      = 500;               % sampling rate (Hz)
+% NEW: raw, unprocessed stacked trace view
+ENABLE_RAW_SCOPE   = true;    % show raw EEG with no preliminary cleaning
+RAW_SCOPE_SEC      = 5;       % seconds of data to keep in raw scope window
+
+band    = 'alpha';            % band to visualize
+pullDur = 1;                  % seconds per pull
+fs      = 500;                % sampling rate (Hz)
 host    = '127.0.0.1';
 port    = 51244;
-nCh     = 32;                % number of channels expected from RDA
+nCh     = 32;                 % number of channels expected from RDA
 
 % MCU config (only used if ENABLE_MCU = true)
 mcuPort = "/dev/cu.EEG-ESP32";  % change for your system
@@ -57,6 +66,18 @@ Nch_geom       = numel(chanLabels_sfp);
 Nch        = min(nCh, Nch_geom);
 chanLabels = chanLabels_sfp(1:Nch);
 coords     = coords(1:Nch, :);
+
+% Set global channel count + default groups (used by UI)
+NCH_GLOBAL   = Nch;
+RAW_CH_GROUP = 1:Nch;
+MON_CH_GROUP = 1:Nch;
+
+% Build channel group labels: All, 1–8, 9–16, ...
+groupLabels = {'All'};
+for startIdx = 1:8:Nch
+    endIdx = min(startIdx+7, Nch);
+    groupLabels{end+1} = sprintf('%d-%d', startIdx, endIdx); %#ok<SAGROW>
+end
 
 % 2D topo projection
 theta  = atan2(coords(:,2), coords(:,1));   % azimuth
@@ -97,6 +118,14 @@ end
 % 1) Simple monitor
 if ENABLE_MONITOR
     mon = eeg_monitor_init();
+    % Add channel group menu for monitor
+    uicontrol('Style','popupmenu', ...
+              'Parent', mon.fig, ...
+              'String', groupLabels, ...
+              'Units','pixels', ...
+              'Position', [10 10 120 20], ...
+              'TooltipString','Monitor channels: All, 1-8, 9-16, ...', ...
+              'Callback', @(src,evt)select_channel_group(src,'mon'));
 else
     mon = [];
 end
@@ -120,6 +149,31 @@ if ENABLE_3D
     vis3D = eeg_3d_lightmap_init(chanLabels, x3d, y3d, z3d, band);
 else
     vis3D = [];
+end
+
+% 5) NEW: raw stacked-scope figure
+if ENABLE_RAW_SCOPE
+    rawScope.fig   = figure('Name','Raw EEG Scope (µV, unprocessed)', ...
+                            'NumberTitle','off');
+    rawScope.ax    = axes('Parent', rawScope.fig);
+    hold(rawScope.ax, 'on');
+    xlabel(rawScope.ax, 'Time (s)');
+    ylabel(rawScope.ax, 'Channel (offset traces)');
+    title(rawScope.ax, 'Raw EEG (no cleaning)');
+    rawScope.lines = [];         % will init once Nuse is known
+    rawScope.buf   = [];         % [Nuse x (fs*RAW_SCOPE_SEC)]
+    rawScope.pos   = 0;          % circular buffer index
+
+    % Channel group menu for raw scope
+    uicontrol('Style','popupmenu', ...
+              'Parent', rawScope.fig, ...
+              'String', groupLabels, ...
+              'Units','pixels', ...
+              'Position', [10 10 120 20], ...
+              'TooltipString','Raw channels: All, 1-8, 9-16, ...', ...
+              'Callback', @(src,evt)select_channel_group(src,'raw'));
+else
+    rawScope = [];
 end
 
 %% --- Prepare EEG struct for region-bandpower function ---
@@ -164,23 +218,89 @@ while true
         Nuse = Nch;
     end
 
-    Xuse        = X(1:Nuse, :);
-    EEG.data    = Xuse;
+    Xuse         = X(1:Nuse, :);        % raw, unprocessed µV
+    EEG.data     = Xuse;
     EEG.chanlocs = struct('labels', chanLabels(1:Nuse));
 
     % Basic stats
+    means   = mean(Xuse,2);
+    nonzero = sum(any(Xuse,2));
     blockCount = blockCount + 1;
-    means      = mean(Xuse,2);
-    nonzero    = sum(any(Xuse,2));
     fprintf('[%s] Block %d | %d samples | %d/%d active channels | mean range: %.2f–%.2f µV\n',...
         datestr(now,'HH:MM:SS'), blockCount, nSamp, nonzero, Nuse, min(means), max(means));
 
-    %% 1) Update simple monitor
-    if ENABLE_MONITOR && ~isempty(mon) && isvalid(mon.fig)
-        eeg_monitor_update(mon, Xuse, means, nonzero);
+    % --- Get current channel groups (cap to Nuse) ---
+    global RAW_CH_GROUP MON_CH_GROUP NCH_GLOBAL
+    chIdxRaw = intersect(1:Nuse, RAW_CH_GROUP);
+    chIdxMon = intersect(1:Nuse, MON_CH_GROUP);
+
+    if isempty(chIdxRaw), chIdxRaw = 1:min(8,Nuse); end
+    if isempty(chIdxMon), chIdxMon = 1:min(8,Nuse); end
+
+    %% 0) NEW: Update raw stacked EEG scope (no cleaning)
+    if ENABLE_RAW_SCOPE && ~isempty(rawScope) && isvalid(rawScope.fig)
+        % Initialize buffer + lines lazily when we know Nuse
+        if isempty(rawScope.buf) || size(rawScope.buf,1) ~= Nuse
+            rawScope.buf = zeros(Nuse, fs * RAW_SCOPE_SEC);
+            rawScope.pos = 0;
+
+            cla(rawScope.ax);
+            hold(rawScope.ax, 'on');
+            tAxis = (0:size(rawScope.buf,2)-1) / fs;
+            rawScope.lines = gobjects(Nuse,1);
+            for c = 1:Nuse
+                rawScope.lines(c) = plot(rawScope.ax, tAxis, nan(1, numel(tAxis)));
+            end
+            xlabel(rawScope.ax, 'Time (s)');
+            ylabel(rawScope.ax, 'Channel (offset traces)');
+            title(rawScope.ax, sprintf('Raw EEG (last %d s, µV, unprocessed)', RAW_SCOPE_SEC));
+        end
+
+        % Append new block to circular buffer
+        k = size(Xuse,2);
+        L = size(rawScope.buf,2);
+        idx = mod(rawScope.pos + (1:k) - 1, L) + 1;
+        rawScope.buf(:,idx) = Xuse;
+        rawScope.pos = idx(end);
+
+        % Reorder buffer so that time is increasing along tAxis
+        tailIdx = mod(rawScope.pos - (L-1):rawScope.pos, L) + 1;
+        bufPlot = rawScope.buf(:, tailIdx);
+
+        % For raw scope, only display selected channels (others NaN)
+        chStd = std(bufPlot(chIdxRaw,:), 0, 2);
+        baseScale = max(chStd);
+        if baseScale <= 0
+            baseScale = 1;
+        end
+        offsets = (0:numel(chIdxRaw)-1)' * (baseScale * 5);  % spacing
+
+        tAxis = (0:L-1) / fs;
+        % First set all lines to NaN
+        for c = 1:Nuse
+            set(rawScope.lines(c), 'XData', tAxis, 'YData', nan(1, numel(tAxis)));
+        end
+        % Now update only the selected group
+        for kCh = 1:numel(chIdxRaw)
+            c = chIdxRaw(kCh);
+            set(rawScope.lines(c), 'XData', tAxis, ...
+                                   'YData', bufPlot(c,:) + offsets(kCh));
+        end
+
+        % Axes limits
+        rawScope.ax.YLim = [min(offsets)-baseScale*2, max(offsets)+baseScale*2];
+        rawScope.ax.XLim = [tAxis(1), tAxis(end)];
     end
 
-    %% 2) Per-channel bandpower (for topo + 3D)
+    %% 1) Update simple monitor (using selected group)
+    if ENABLE_MONITOR && ~isempty(mon) && isvalid(mon.fig)
+        Xmon    = Xuse(chIdxMon,:);
+        meansMn = means(chIdxMon);
+        nonzMn  = sum(any(Xmon,2));
+        eeg_monitor_update(mon, Xmon, meansMn, nonzMn);
+    end
+
+    %% 2) Per-channel bandpower (for topo + 3D) – still uses all Nuse channels
     if ENABLE_TOPO || ENABLE_3D
         valsCh = zeros(1,Nuse);
         for c = 1:Nuse
@@ -252,7 +372,6 @@ while true
         end
     end
 
-
     drawnow limitrate nocallbacks;
 end
 
@@ -260,4 +379,33 @@ end
 try, bv_rda_client('close'); end %#ok<TRYNC>
 if ENABLE_MCU && ~isempty(mcu)
     clear mcu
+end
+
+%% --- Local helper: channel group selection callback ---
+
+function select_channel_group(src, mode)
+% mode = 'raw' or 'mon'
+global RAW_CH_GROUP MON_CH_GROUP NCH_GLOBAL
+
+labels = src.String;
+val    = src.Value;
+choice = labels{val};
+
+if strcmpi(choice, 'All')
+    idx = 1:NCH_GLOBAL;
+else
+    % Expect "start-end" format, e.g., "1-8"
+    parts = sscanf(choice, '%d-%d');
+    if numel(parts) == 2
+        idx = parts(1):parts(2);
+    else
+        idx = 1:NCH_GLOBAL;
+    end
+end
+
+if strcmpi(mode,'raw')
+    RAW_CH_GROUP = idx;
+elseif strcmpi(mode,'mon')
+    MON_CH_GROUP = idx;
+end
 end
