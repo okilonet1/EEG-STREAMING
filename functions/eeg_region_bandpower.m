@@ -6,12 +6,20 @@ function regionBandPower = eeg_region_bandpower(EEG)
 %   regionBandPower = eeg_region_bandpower(EEG)
 %
 % regionBandPower.(band) -> 1 x nRegions normalized [0,1] values.
+%
+% NOTE:
+%   Light preprocessing is handled by eeg_preclean_light():
+%     - CAR
+%     - HP 0.5 Hz
+%     - Notch 59–61 Hz
+%     - LP 45 Hz
 
 % ----------------------------------------------------
 % --- Reset persistent variables when called with no args ---
-persistent smoothVals_perBand hp notch lp lastFs
+persistent smoothVals_perBand
 if nargin == 0
-    clear smoothVals_perBand hp notch lp lastFs
+    clear smoothVals_perBand
+    eeg_preclean_light('reset');   % also reset filters there
     return
 end
 
@@ -27,30 +35,14 @@ fs     = EEG.srate;
 labels = upper(string({EEG.chanlocs.labels}));
 
 % --- Load regions and band ranges ---
-[regions, regionNames] = eeg_get_regions();
+[regions, regionNames] = eeg_get_regions(); %#ok<NASGU>
 nR    = size(regions,1);
 bands = eeg_get_band_ranges();
 bandNames = fieldnames(bands);
 
 % ----------------------------------------------------
-% --- LIGHT PREPROCESSING PIPELINE ---
-% Common average reference
-data = data - mean(data,1);
-
-% Design (or reuse) filters; redesign if sample rate changes
-if isempty(hp) || isempty(lastFs) || lastFs ~= fs
-    hp = designfilt('highpassiir','FilterOrder',4, ...
-        'HalfPowerFrequency',0.5,'SampleRate',fs);
-    notch = designfilt('bandstopiir','FilterOrder',4, ...
-        'HalfPowerFrequency1',59,'HalfPowerFrequency2',61,'SampleRate',fs);
-    lp = designfilt('lowpassiir','FilterOrder',4, ...
-        'HalfPowerFrequency',45,'SampleRate',fs);
-    lastFs = fs;
-end
-
-data = filtfilt(hp,    data')';
-data = filtfilt(notch, data')';
-data = filtfilt(lp,    data')';
+% --- LIGHT PREPROCESSING (shared with monitor, etc.) ---
+data = eeg_preclean_light(data, fs);
 
 % ----------------------------------------------------
 % --- BANDPOWER COMPUTATION ---
