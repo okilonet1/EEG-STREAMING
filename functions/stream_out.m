@@ -24,6 +24,12 @@ persistent tc srv sp   % tc = tcpclient, srv = tcpserver, sp = serialport
 payload = typecast(single(data(:)), 'uint8');
 payload = payload(:)';
 
+if isempty(payload)
+    warning('[stream_out] Empty payload; skipping write.');
+    return
+end
+
+
 switch lower(protocol)
 
     % ============================

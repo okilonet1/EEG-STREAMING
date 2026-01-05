@@ -27,7 +27,7 @@ port        = 51244;       % RDA port
 nCh         = 32;          % expected channels
 
 % TCP visualizer target
-VIS_IP      = "127.0.0.1"; % Loopback; change to Badie's IP if needed
+VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP 
 VIS_PORT    = 9000;        % Choose any open port (TouchDesigner)
 
 ENABLE_MONITOR = true;      % local 2-panel EEG monitor
@@ -35,6 +35,7 @@ ENABLE_TOPO     = false;    % per-channel topo
 ENABLE_REGION   = false;    % 16-region bandpower bubble map
 ENABLE_TCP_RAW  = false;     % send raw EEG data over TCP
 ENABLE_TCP_BP   = false;     % send bandpower over TCP
+ENABLE_TCP_FFT  = true;     % send FFT over TCP
 
 % Clean up only the TCP server on VIS_PORT from a previous run
 try
@@ -169,7 +170,25 @@ while true
         stream_out(dataRaw, "tcp_server", "", VIS_PORT);
     end
 
+    %% =============== SEND FFT OVER TCP (binary float32) ===============
+    if ENABLE_TCP_FFT
+        opts = struct('winSec',1.0,'nfft',512,'smoothAlpha',0.3,'return',"fft");
+        out  = eeg_fft_realtime(Xuse, fs, opts);
 
+
+
+        if out.ready
+            fftMag = abs(out.fft);                 % [nCh x nBins] numeric
+            fprintf('[stream_to_visualiser] FFT ready, sending over TCP...\n');
+            fprintf("ready=%d | size(psd)=%s | size(fft)=%s\n", ...
+                out.ready, mat2str(size(out.psd)), mat2str(size(out.fft)));
+
+            stream_out(fftMag, "tcp", VIS_IP, VIS_PORT);
+
+
+        end
+
+    end
 
     drawnow limitrate nocallbacks;
 end
