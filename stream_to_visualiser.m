@@ -20,22 +20,22 @@ addpath('functions');
 % =============================
 
 band        = 'alpha';     % band to compute (optional)
-pullDur     = 1;         % seconds per pull
+pullDur     = 0.02;         % seconds per pull
 fs          = 500;         % sampling rate
 host        = '127.0.0.1'; % BrainVision Recorder
 port        = 51244;       % RDA port
 nCh         = 32;          % expected channels
 
 % TCP visualizer target
-VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP
-VIS_PORT    = 9000;        % Choose any open port (TouchDesigner)
+VIS_IP      = "169.254.179.155"; % Loopback; change to Visualiser IP
+VIS_PORT    = 7006;        % Choose any open port (TouchDesigner)
 
 ENABLE_MONITOR = true;      % local 2-panel EEG monitor
 ENABLE_TOPO     = false;    % per-channel topo
 ENABLE_REGION   = false;    % 16-region bandpower bubble map
-ENABLE_TCP_RAW  = false;     % send raw EEG data over TCP
+ENABLE_TCP_RAW  = true;     % send raw EEG data over TCP
 ENABLE_TCP_BP   = false;     % send bandpower over TCP
-ENABLE_TCP_FFT  = true;     % send FFT over TCP
+ENABLE_TCP_FFT  = false;     % send FFT over TCP
 
 % Clean up only the TCP server on VIS_PORT from a previous run
 try
@@ -52,7 +52,9 @@ cleanupObj = onCleanup(@() stream_out(0, "close", "", VIS_PORT));
 fprintf('[stream_to_visualiser] Connecting to RDA…\n');
 try, bv_rda_client('close'); end
 S = bv_rda_client('open', host, port, nCh, fs); %#ok<NASGU>
-pause(1.5);
+pause(.5);
+
+
 
 %% ============================
 % Load channel labels (.sfp)
@@ -167,7 +169,8 @@ while true
     if ENABLE_TCP_RAW
         dataRaw = single(Xuse);
         % stream_out(dataRaw, "tcp", VIS_IP, VIS_PORT);
-        stream_out(dataRaw, "tcp_server", "", VIS_PORT);
+        v = dataRaw(8,1);                           % one sample, one channel
+        stream_out(v, "tcp", VIS_IP, VIS_PORT);
     end
 
     %% =============== SEND FFT OVER TCP (binary float32) ===============
@@ -192,10 +195,12 @@ while true
             fprintf("ready=%d | size(psd)=%s | size(fft)=%s\n", ...
                 out.ready, mat2str(size(out.psd)), mat2str(size(out.fft)));
 
-            stream_out(testFFT, "tcp", VIS_IP, VIS_PORT);
+            stream_out(Xuse, "tcp", VIS_IP, VIS_PORT);
 
 
         end
+
+
 
     end
 
