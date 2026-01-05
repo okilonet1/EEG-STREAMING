@@ -27,7 +27,7 @@ port        = 51244;       % RDA port
 nCh         = 32;          % expected channels
 
 % TCP visualizer target
-VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP 
+VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP
 VIS_PORT    = 9000;        % Choose any open port (TouchDesigner)
 
 ENABLE_MONITOR = true;      % local 2-panel EEG monitor
@@ -175,6 +175,15 @@ while true
         opts = struct('winSec',1.0,'nfft',512,'smoothAlpha',0.3,'return',"fft");
         out  = eeg_fft_realtime(Xuse, fs, opts);
 
+        nCh   = 32;
+        nBins = 257;
+
+        testFFT = zeros(nCh, nBins);
+
+        for ch = 1:nCh
+            testFFT(ch, 1) = ch;              % channel index marker
+            testFFT(ch, 2:end) = 1:(nBins-1); % ramp so TD can see ordering
+        end
 
 
         if out.ready
@@ -183,7 +192,7 @@ while true
             fprintf("ready=%d | size(psd)=%s | size(fft)=%s\n", ...
                 out.ready, mat2str(size(out.psd)), mat2str(size(out.fft)));
 
-            stream_out(fftMag, "tcp", VIS_IP, VIS_PORT);
+            stream_out(testFFT, "tcp", VIS_IP, VIS_PORT);
 
 
         end
