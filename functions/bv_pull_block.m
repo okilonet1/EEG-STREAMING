@@ -7,9 +7,11 @@ Y = double(X)';                      % [Ns x Nc]
 [~, Nc] = size(Y);
 
 % de-mean and robust normalize
+% robust per-channel normalize (less jumpy)
 Y = Y - mean(Y,1,'omitnan');
-s = prctile(abs(Y(:)),99); if ~isfinite(s) || s==0, s = max(1,std(Y(:))); end
-Y = Y * (50/s);
+s = prctile(abs(Y), 99, 1);          % 1 x Nc
+s(~isfinite(s) | s==0) = 1;
+Y = Y .* (50 ./ s);
 
 % vertical offsets so 64 traces don't overlap
 step = 8; offsets = ((0:Nc-1)*step) - ((Nc-1)*step/2);

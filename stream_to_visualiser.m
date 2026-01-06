@@ -22,11 +22,13 @@ addpath('functions');
 band        = 'alpha';     % band to compute (optional)
 pullDur     = 0.02;         % seconds per pull
 fs          = 500;         % sampling rate
+% host        = '192.168.50.7'; % BrainVision Recorder
 host        = '127.0.0.1'; % BrainVision Recorder
 port        = 51244;       % RDA port
 nCh         = 32;          % expected channels
 
 % TCP visualizer target
+% VIS_IP      = "192.168.50.219"; % Loopback; change to Visualiser IP
 VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP
 VIS_PORT    = 7006;        % Choose any open port (TouchDesigner)
 
@@ -51,10 +53,22 @@ cleanupObj = onCleanup(@() stream_out(0, "close", "", VIS_PORT));
 % Connect to RDA
 % =============================
 
-fprintf('[stream_to_visualiser] Connecting to RDA…\n');
-try, bv_rda_client('close'); end
-S = bv_rda_client('open', host, port, nCh, fs); %#ok<NASGU>
-pause(.5);
+try
+    bv_rda_client('close');
+catch
+end
+
+bv_rda_client('open', host, port, nCh, fs);
+pause(0.5);
+
+% bv_rda_client('debug', true);
+
+% trigger ingestion + debug prints
+% for k = 1:20
+%     X = bv_rda_client('pull', 0.02);
+%     fprintf("range uV: [%.2f, %.2f], mean=%.2f\n", min(X(:)), max(X(:)), mean(X(:)));
+%     pause(0.02);
+% end
 
 
 
@@ -171,7 +185,9 @@ while true
     if ENABLE_TCP_RAW
         dataRaw = single(Xuse);
         % stream_out(dataRaw, "tcp", VIS_IP, VIS_PORT);
-        v = dataRaw(8,1);                           % one sample, one channel
+        % v = dataRaw(8,1);                           % one sample, one channel
+        v = dataRaw(8,end);
+
         stream_out(v, "tcp", VIS_IP, VIS_PORT);
     end
 
@@ -209,9 +225,11 @@ while true
 
     % ====== STREAM ONE NORMALIZED FEATURE (0..1) FAST ======
     if ENABLE_FEATURE
-        y01 = feature_norm01(Xuse, fs, FEATURE_MODE);   % one number in [0,1]
-        stream_out(single(y01), "tcp", VIS_IP, VIS_PORT);
+        y01 = feature_norm01(Xuse, fs, FEATURE_MODE);   % [0,1]
+        % Send one value per line to TouchDesigner TCP/IP DAT (Server)
+        stream_out(sprintf('%.6f\n', y01), "tcp", VIS_IP, VIS_PORT);
     end
+
 
     drawnow limitrate nocallbacks;
 end

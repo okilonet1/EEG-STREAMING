@@ -1,4 +1,4 @@
-function tcp_connection_logger(src, evt)
+function tcp_connection_logger(~, evt)
 % Logs client connect/disconnect events for tcpserver
 
 timestamp = datestr(now, 'yyyy-mm-dd HH:MM:SS');

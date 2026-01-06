@@ -1,14 +1,19 @@
 function stream_out(data, protocol, target, varargin)
-% STREAM_OUT  Sends arbitrary data from MATLAB to an external device.
+% STREAM_OUT  Send data from MATLAB to external apps/devices.
 %
-% USAGE:
-%   stream_out(data, "tcp",        "127.0.0.1", 9000)   % MATLAB = client (TEXT table for TouchDesigner)
-%   stream_out(data, "tcp_server", "",           9000)   % MATLAB = server (TEXT table, TouchDesigner-friendly)
-%   stream_out(data, "udp",        "192.168.1.20", 8000)
-%   stream_out(data, "serial",     "/dev/cu.EEG-ESP32", 115200)
+% Key TouchDesigner mode:
+%   stream_out(val, "tcp_server_line", "", 9000)   % MATLAB is TCP server, sends "val\n"
+%
+% Other modes:
+%   stream_out(mat, "tcp_server",      "", 9000)   % TEXT table (rows)
+%   stream_out(mat, "tcp",        "127.0.0.1", 9000)
+%   stream_out(vec, "udp",        "192.168.1.20", 8000) % binary float32
+%   stream_out(vec, "serial",     "/dev/cu.EEG-ESP32", 115200)
+%   stream_out([],  "close",      "", 9000)        % close tcpserver on port (optional)
+%   stream_out([],  "close",      "", 0, "all")    % close everything
 
 arguments
-    data       {mustBeNumeric}
+    data
     protocol   {mustBeTextScalar}
     target     {mustBeTextScalar}
 end
@@ -17,168 +22,165 @@ arguments (Repeating)
     varargin
 end
 
-% ---------- persistent handles (declare ONCE) ----------
-persistent tc srv sp   % tc = tcpclient, srv = tcpserver, sp = serialport
+% persistent handles
+persistent tc srv sp u udpTarget udpPort
 
-% Default payload for binary protocols = float32 row vector as bytes
-payload = typecast(single(data(:)), 'uint8');
-payload = payload(:)';
+NL = char(10);
 
-if isempty(payload)
-    warning('[stream_out] Empty payload; skipping write.');
-    return
-end
+switch lower(string(protocol))
 
-
-switch lower(protocol)
-
-    % ============================
-    % TCP CLIENT (TEXT TABLE for TouchDesigner)
-    % ============================
-    case "tcp"
+    % =========================================================
+    % TCP SERVER (ONE VALUE PER LINE) - TouchDesigner TCP/IP DAT
+    % =========================================================
+    case "tcp_server_line"
         if numel(varargin) < 1
-            error("TCP requires port number");
+            error("tcp_server_line requires port number");
         end
         port = varargin{1};
 
-        % ---- Build text payload as plain char ----
-        if isnumeric(data)
-            if ismatrix(data)
-                [nRows, ~] = size(data);
-                buf = '';  % char buffer
-                for r = 1:nRows
-                    % "v1 v2 ... vN"
-                    line = sprintf('%.5f ', data(r, :));
-                    line = strtrim(line);                 % remove trailing space
-                    buf  = sprintf('%s%s\n', buf, line);  % append line + newline
-                end
-                frameStr = buf; % char
-            else
-                % Fallback: vector or higher-dim -> flatten as single line
-                line = sprintf('%.5f ', data(:));
-                frameStr = [strtrim(line) sprintf('\n')]; % char
-            end
-        else
-            frameStr = char(data);
-            if isempty(frameStr) || frameStr(end) ~= sprintf('\n')
-                frameStr = [frameStr sprintf('\n')];
-            end
-        end
-
-        payloadText = uint8(frameStr);   % UTF-8-compatible bytes
-
-        % ---- Ensure TCP client exists ----
-        if isempty(tc) || ~isvalid(tc)
-            try
-                tc = tcpclient(target, port, 'Timeout', 1);
-                fprintf("[stream_out] TCP client (TEXT) connected to %s:%d\n", target, port);
-            catch E
-                warning(E.identifier, '[stream_out] TCP client connect failed to %s:%d: %s', ...
-                    target, port, E.message);
-                return;
-            end
-        end
-
-        % ---- Send the text ----
-        try
-            write(tc, payloadText, "uint8");
-        catch E
-            warning(E.identifier, '[stream_out] TCP client write failed: %s', E.message);
-            clear tc;
-            tc = [];
-        end
-
-
-
-        % ============================
-        % TCP SERVER (TEXT TABLE for TouchDesigner)
-        % ============================
-    case "tcp_server"
-        if numel(varargin) < 1
-            error("TCP server requires port number");
-        end
-        port = varargin{1};
-
-        % ---- Ensure TCP server exists ----
+        % Ensure server exists
         if isempty(srv) || ~isvalid(srv)
-            try
-                srv = tcpserver("0.0.0.0", port);
-                fprintf("[stream_out] TCP server (TEXT) listening on port %d\n", port);
-                srv.ConnectionChangedFcn = @(src, evt) tcp_connection_logger(src, evt);
-
-            catch E
-                warning(E.identifier, '[stream_out] TCP server start failed on port %d: %s', ...
-                    port, E.message);
-                return;
-            end
+            srv = tcpserver("0.0.0.0", port);
+            srv.ConnectionChangedFcn = @(src,evt) tcp_connection_logger(src,evt);
+            fprintf("[stream_out] TCP server (LINE) listening on port %d\n", port);
         end
 
-        % ---- Build text payload as plain char (same format as client) ----
-        if isnumeric(data)
-            if ismatrix(data)
-                [nRows, ~] = size(data);
-                buf = '';  % char buffer
-                for r = 1:nRows
-                    line = sprintf('%.5f ', data(r, :));
-                    line = strtrim(line);
-                    buf  = sprintf('%s%s\n', buf, line);
-                end
-                frameStr = buf;
-            else
-                line = sprintf('%.5f ', data(:));
-                frameStr = [strtrim(line) sprintf('\n')];
-            end
-        else
-            frameStr = char(data);
-            if isempty(frameStr) || frameStr(end) ~= sprintf('\n')
-                frameStr = [frameStr sprintf('\n')];
-            end
+        % No client -> skip quietly
+        if ~srv.Connected
+            return
         end
 
-        payloadText = uint8(frameStr);   % UTF-8-compatible bytes
+        % Accept numeric scalar only (clean)
+        if isempty(data) || ~isnumeric(data) || ~isscalar(data) || ~isfinite(data)
+            return
+        end
 
-        % ---- Try writing; ignore "no client" errors quietly ----
+        % One value per line, clean (no spaces)
+        line = sprintf('%.6f\n', double(data));  % adjust precision if you want
         try
-            write(srv, payloadText, "uint8");
+            write(srv, uint8(line), "uint8");
         catch E
-            % If there's no client yet, MATLAB throws this specific message.
-            % We just ignore that case instead of warning/clearing the server.
-            if contains(E.message, 'A TCP/IP client must be connected')
-                % no clients connected yet -> just skip this frame
-                return;
-            end
-
-            % Real error: warn and reset
-            warning(E.identifier, '[stream_out] TCP server write failed: %s', E.message);
-            clear srv;
+            warning(E.identifier, '[stream_out] TCP server (LINE) write failed: %s', E.message);
+            try, clear srv; end %#ok<TRYNC>
             srv = [];
         end
 
 
-
         % ============================
-        % UDP (binary float32)
+        % TCP CLIENT (TEXT TABLE)
         % ============================
-
-
-    case "udp"
+    case "tcp"
         if numel(varargin) < 1
-            error("UDP requires port number");
+            error("tcp requires port number");
         end
         port = varargin{1};
 
-        u = udpport("datagram");
-        write(u, payload, target, port);
-        clear u
+        payloadText = build_text_payload(data, NL);
+
+        if isempty(tc) || ~isvalid(tc)
+            try
+                tc = tcpclient(target, port, 'Timeout', 1, 'ConnectTimeout', 1);
+                fprintf("[stream_out] TCP client (TEXT) connected to %s:%d\n", target, port);
+            catch E
+                warning(E.identifier, '[stream_out] TCP client connect failed to %s:%d: %s', ...
+                    target, port, E.message);
+                return
+            end
+        end
+
+
+
+        try
+            write(tc, payloadText, "uint8");
+        catch E
+            warning(E.identifier, '[stream_out] TCP client write failed: %s', E.message);
+            try, clear tc; end %#ok<TRYNC>
+            tc = [];
+        end
+
 
         % ============================
-        % SERIAL / BLUETOOTH (binary)
+        % TCP SERVER (TEXT TABLE)
+        % ============================
+    case "tcp_server"
+        if numel(varargin) < 1
+            error("tcp_server requires port number");
+        end
+        port = varargin{1};
+
+        if isempty(srv) || ~isvalid(srv)
+            try
+                srv = tcpserver("0.0.0.0", port);
+                srv.ConnectionChangedFcn = @(src,evt) tcp_connection_logger(src,evt);
+                fprintf("[stream_out] TCP server (TEXT) listening on port %d\n", port);
+            catch E
+                warning(E.identifier, '[stream_out] TCP server start failed on port %d: %s', ...
+                    port, E.message);
+                return
+            end
+        end
+
+        if ~srv.Connected
+            return
+        end
+
+        payloadText = build_text_payload(data, NL);
+
+        try
+            write(srv, payloadText, "uint8");
+        catch E
+            warning(E.identifier, '[stream_out] TCP server write failed: %s', E.message);
+            try, clear srv; end %#ok<TRYNC>
+            srv = [];
+        end
+
+
+        % ============================
+        % UDP (binary float32)  [persistent socket for speed]
+        % ============================
+    case "udp"
+        if numel(varargin) < 1
+            error("udp requires port number");
+        end
+        port = varargin{1};
+
+        if ~isnumeric(data)
+            error("udp expects numeric data (packed as float32).");
+        end
+
+        if isempty(u) || ~isvalid(u)
+            u = udpport("datagram");
+            udpTarget = "";
+            udpPort   = [];
+        end
+
+        payload = typecast(single(data(:)), 'uint8');
+        payload = payload(:)';
+
+        udpTarget = string(target);
+        udpPort   = port;
+
+        try
+            write(u, payload, target, port);
+        catch E
+            warning(E.identifier, '[stream_out] UDP write failed: %s', E.message);
+            try, clear u; end %#ok<TRYNC>
+            u = [];
+        end
+
+
+        % ============================
+        % SERIAL (binary float32 + newline)
         % ============================
     case "serial"
         if numel(varargin) < 1
-            error("Serial requires baud rate");
+            error("serial requires baud rate");
         end
         baud = varargin{1};
+
+        if ~isnumeric(data)
+            error("serial expects numeric data (packed as float32).");
+        end
 
         if isempty(sp) || ~isvalid(sp)
             sp = serialport(target, baud);
@@ -186,39 +188,76 @@ switch lower(protocol)
             fprintf("[stream_out] Serial connected: %s @ %d\n", target, baud);
         end
 
+        payload = typecast(single(data(:)), 'uint8');
+        payload = payload(:)';
+
         write(sp, payload, "uint8");
-        write(sp, uint8(10), "uint8");   % newline terminator
+        write(sp, uint8(10), "uint8");
+
 
         % ============================
-        % CLOSE / CLEANUP (port-aware)
+        % CLOSE / CLEANUP
         % ============================
     case "close"
-        % Optional: port number to close
         portToClose = [];
+        closeAll = false;
+
         if ~isempty(varargin)
-            portToClose = varargin{1};   % e.g. VIS_PORT
+            portToClose = varargin{1};
+        end
+        if numel(varargin) >= 2
+            closeAll = strcmpi(string(varargin{2}), "all");
         end
 
-        % ---- Close only this function's tcpserver on that port (if any) ----
         if ~isempty(srv) && isvalid(srv)
             try
-                if isempty(portToClose) || srv.Port == portToClose
+                if isempty(portToClose) || portToClose == 0 || srv.Port == portToClose
                     fprintf('[stream_out] Closing TCP server on port %d\n', srv.Port);
-                    clear srv;
+                    try, clear srv; end %#ok<TRYNC>
                     srv = [];
                 end
             catch
-                % If srv.Port is unsupported for some reason, just clear it
-                clear srv;
+                try, clear srv; end %#ok<TRYNC>
                 srv = [];
             end
         end
 
-        % NOTE: we do NOT touch tc or sp here, so other TCP clients / serial
-        % connections created via stream_out stay alive.
-        return;
+        if closeAll
+            if ~isempty(tc) && isvalid(tc), try, clear tc; end, tc=[]; end %#ok<TRYNC>
+            if ~isempty(sp) && isvalid(sp), try, clear sp; end, sp=[]; end %#ok<TRYNC>
+            if ~isempty(u)  && isvalid(u),  try, clear u;  end, u=[];  end %#ok<TRYNC>
+        end
+        return
 
     otherwise
-        error("Unknown protocol. Use 'tcp', 'tcp_server', 'udp', or 'serial'.");
+        error("Unknown protocol. Use 'tcp', 'tcp_server', 'tcp_server_line', 'udp', 'serial', or 'close'.");
 end
+
+end
+
+
+% ---------- helper: TouchDesigner-friendly TEXT payload ----------
+function payloadText = build_text_payload(data, NL)
+if isnumeric(data)
+    if ismatrix(data)
+        lines = join(compose('%.5f', data), " ", 2); % nRows x 1 string
+        frameStr = join(lines, NL) + NL;            % ensure trailing newline
+    else
+        frameStr = join(compose('%.5f', data(:).'), " ") + NL;
+    end
+    payloadText = uint8(char(frameStr));
+    return
+end
+
+s = string(data);
+if strlength(s) == 0
+    payloadText = uint8(NL);
+    return
+end
+
+c = char(s);
+if c(end) ~= NL
+    c(end+1) = NL;
+end
+payloadText = uint8(c);
 end
