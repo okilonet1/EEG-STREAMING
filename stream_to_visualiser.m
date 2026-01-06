@@ -27,15 +27,17 @@ port        = 51244;       % RDA port
 nCh         = 32;          % expected channels
 
 % TCP visualizer target
-VIS_IP      = "169.254.179.155"; % Loopback; change to Visualiser IP
+VIS_IP      = "127.0.0.1"; % Loopback; change to Visualiser IP
 VIS_PORT    = 7006;        % Choose any open port (TouchDesigner)
 
 ENABLE_MONITOR = true;      % local 2-panel EEG monitor
 ENABLE_TOPO     = false;    % per-channel topo
 ENABLE_REGION   = false;    % 16-region bandpower bubble map
-ENABLE_TCP_RAW  = true;     % send raw EEG data over TCP
+ENABLE_TCP_RAW  = false;     % send raw EEG data over TCP
 ENABLE_TCP_BP   = false;     % send bandpower over TCP
 ENABLE_TCP_FFT  = false;     % send FFT over TCP
+ENABLE_FEATURE  = true;    % stream ONE normalized feature (0..1)
+FEATURE_MODE    = "kurtosis";   % "kurtosis" | "alpha" | "emg"
 
 % Clean up only the TCP server on VIS_PORT from a previous run
 try
@@ -204,5 +206,132 @@ while true
 
     end
 
+
+    % ====== STREAM ONE NORMALIZED FEATURE (0..1) FAST ======
+    if ENABLE_FEATURE
+        y01 = feature_norm01(Xuse, fs, FEATURE_MODE);   % one number in [0,1]
+        stream_out(single(y01), "tcp", VIS_IP, VIS_PORT);
+    end
+
     drawnow limitrate nocallbacks;
+end
+
+function y01 = feature_norm01(Xuse, fs, mode)
+% FEATURE_NORM01  Returns one normalized scalar in [0,1] for visualization.
+%
+% mode:
+%   "kurtosis" -> artifact/spike intensity
+%   "alpha"    -> calm/alpha energy (8–13 Hz)
+%   "emg"      -> movement/EMG burst (30–80 Hz or 30–100 Hz depending on fs)
+
+arguments
+    Xuse {mustBeNumeric}
+    fs (1,1) double {mustBePositive}
+    mode (1,1) string
+end
+
+% ---- persistent state (rolling window + normalization) ----
+persistent RB nWin mu var featPrev step lastMode lastFs
+
+% ---- parameters ----
+winSec     = 1.0;                 % 1-second stable feature window
+nWinTarget = max(64, round(winSec * fs));
+smoothAlpha = 0.2;                % feature smoothing (0..1)
+baseAlpha   = 0.01;               % baseline adapts slowly
+computeEvery = 3;                 % do heavy compute every N calls (keeps speed)
+
+[nCh, nNew] = size(Xuse);
+
+% ---- re-init if needed ----
+if isempty(RB) || isempty(nWin) || size(RB,1) ~= nCh || nWin ~= nWinTarget || isempty(lastMode) || mode ~= lastMode || isempty(lastFs) || fs ~= lastFs
+    nWin = nWinTarget;
+    RB = zeros(nCh, nWin, 'single');
+    mu = 0; var = 1;
+    featPrev = 0;
+    step = 0;
+    lastMode = mode;
+    lastFs = fs;
+end
+
+% ---- update rolling buffer ----
+Xuse = single(Xuse);
+if nNew >= nWin
+    RB = Xuse(:, end-nWin+1:end);
+else
+    RB(:, 1:end-nNew) = RB(:, nNew+1:end);
+    RB(:, end-nNew+1:end) = Xuse;
+end
+
+% ---- compute feature (optionally downsample compute cadence) ----
+step = step + 1;
+
+doCompute = (mod(step, computeEvery) == 0);
+
+if ~doCompute
+    feat = featPrev;  % reuse last computed feature
+else
+    switch lower(mode)
+        case "kurtosis"
+            % Artifact intensity: excess kurtosis across channels
+            Xw = double(RB);
+            Xw = Xw - mean(Xw, 2);
+            kuCh = kurtosis(Xw, 0, 2) - 3;     % [nCh x 1]
+            feat = median(kuCh);               % robust one number
+
+        case "alpha"
+            % Calm/alpha energy: average alpha bandpower across channels
+            % Uses a simple FFT-based bandpower estimate from the rolling window.
+            Xw = double(RB);
+            Xw = Xw - mean(Xw, 2);
+
+            nfft = 2^nextpow2(size(Xw,2));
+            Y = fft(Xw, nfft, 2);
+            P = abs(Y(:,1:floor(nfft/2)+1)).^2;
+            f = (0:floor(nfft/2))*(fs/nfft);
+
+            idx = (f >= 8) & (f <= 13);
+            if any(idx)
+                alphaPowCh = mean(P(:,idx), 2);
+                feat = log10(mean(alphaPowCh) + eps);  % log compress
+            else
+                feat = featPrev;
+            end
+
+        case "emg"
+            % Movement/EMG burst: high-frequency power (typically 30–80/100 Hz)
+            Xw = double(RB);
+            Xw = Xw - mean(Xw, 2);
+
+            nfft = 2^nextpow2(size(Xw,2));
+            Y = fft(Xw, nfft, 2);
+            P = abs(Y(:,1:floor(nfft/2)+1)).^2;
+            f = (0:floor(nfft/2))*(fs/nfft);
+
+            hiMax = min(100, fs/2 - 1);       % don’t exceed Nyquist
+            idx = (f >= 30) & (f <= hiMax);
+            if any(idx)
+                hiPowCh = mean(P(:,idx), 2);
+                feat = log10(mean(hiPowCh) + eps);     % log compress
+            else
+                feat = featPrev;
+            end
+
+        otherwise
+            error('Unknown mode "%s". Use "kurtosis", "alpha", or "emg".', mode);
+    end
+end
+
+% ---- smooth feature ----
+featSmooth = smoothAlpha*feat + (1-smoothAlpha)*featPrev;
+featPrev = featSmooth;
+
+% ---- normalize to 0..1 using EMA z-score + tanh squash ----
+mu = (1-baseAlpha)*mu + baseAlpha*featSmooth;
+dx = featSmooth - mu;
+var = (1-baseAlpha)*var + baseAlpha*(dx*dx);
+sigma = sqrt(max(var, 1e-12));
+
+z = dx / sigma;
+z = max(min(z, 4), -4);
+y01 = 0.5 * (tanh(z/2) + 1);
 end
