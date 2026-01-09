@@ -1,12 +1,13 @@
-clear; clc;
+host = "127.0.0.1";
+port = 6700;   % default RCS 2 port
 
-addpath('functions');   % if stream_out.m lives in functions/
+rcs = tcpclient(host, port, "Timeout", 5);
 
-VIS_PORT = 9000;
+% Send a harmless status query
+cmd = "GETSTATUS" + newline;
+write(rcs, cmd, "string");
 
-for k = 1:1000
-    data = randn(4, 8);                  % tiny 4×8 test table
-    stream_out(data, "tcp_server", "", VIS_PORT);
-    fprintf('Sent block %d\n', k);
-    pause(0.5);
-end
+pause(0.1);  % give RCS time to reply
+
+response = read(rcs, rcs.NumBytesAvailable, "string");
+disp(response);

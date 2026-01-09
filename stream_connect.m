@@ -14,9 +14,9 @@ addpath("eeglab2025.1.0")
 % Visualization toggles
 ENABLE_MONITOR     = true;    % advanced monitor graph (raw vs processed)
 ENABLE_REGION_MAP  = false;
-ENABLE_TOPO        = false;
+ENABLE_TOPO        = true;
 ENABLE_3D          = false;
-ENABLE_MCU         = true;
+ENABLE_MCU         = false;
 
 % Recording toggles
 ENABLE_RAW_RECORDING      = false;   % record raw (as pulled from RDA)
@@ -25,7 +25,7 @@ ENABLE_PROCESSED_RECORDING = false;  % record processed data (after your cleanin
 band    = 'alpha';
 pullDur = 1;                  % seconds per pull
 fs      = 500;
-host    = '127.0.0.1';
+host    = '192.168.50.7';
 port    = 51244;
 nCh     = 32;
 
