@@ -19,15 +19,15 @@ cfg.fs      = 500;      % Hz
 cfg.nCh     = 32;
 
 % Two RDA sources
-cfg.host1 = '127.0.0.1';  cfg.port1 = 51244;
-cfg.host2 = '127.0.0.1';  cfg.port2 = 51244;
+cfg.host1 = '192.168.50.216';  cfg.port1 = 51244; % For PC1 [EEG artec] (Jacob)
+cfg.host2 = '127.0.0.1';  cfg.port2 = 51244; % for PC2 [MOCAP] (lauren)
 
 % Names for recording filenames
 cfg.streamName1 = "host1";
 cfg.streamName2 = "host2";
 
 % TouchDesigner targets (TCP/IP DAT in Server mode)
-cfg.visIP    = "127.0.0.1";
+cfg.visIP    = "127.0.0.1"; % change to visualiseation ip (Dr Badie Ip)
 cfg.visPort1 = 7006;
 cfg.visPort2 = 7007;
 
@@ -111,17 +111,29 @@ while true
     doRec = cfg.enableRecording && (mod(rec.step, cfg.recordEveryN) == 0);
 
     if ~isempty(Xuse1) && any(isfinite(Xuse1(:)))
-        o1 = eeg_activity_feature(Xuse1, cfg.fs, "improv_prob", "stream1", opts1);
+        o1 = eeg_activity_feature(Xuse1, cfg.fs, "improv_prob", "stream1", ...
+            "pullDur",  opts1.pullDur, ...
+            "updateHz", opts1.updateHz, ...
+            "fftBand",  opts1.fftBand, ...
+            "useHann",  opts1.useHann, ...
+            "model",    opts1.model);
+
         val1 = o1.y01;
         stream_out(val1, "tcp", cfg.visIP, cfg.visPort1);
-        if doRec, recording_write(rec.fid1, val); end
+        if doRec, recording_write(rec.fid1, val1); end
     end
 
     if ~isempty(Xuse2) && any(isfinite(Xuse2(:)))
-        o2 = eeg_activity_feature(Xuse2, cfg.fs, "improv_prob", "stream2", opts2);
+        o2 = eeg_activity_feature(Xuse2, cfg.fs, "improv_prob", "stream2", ...
+            "pullDur",  opts2.pullDur, ...
+            "updateHz", opts2.updateHz, ...
+            "fftBand",  opts2.fftBand, ...
+            "useHann",  opts2.useHann, ...
+            "model",    opts2.model);
+
         val2 = o2.y01;
         stream_out(val2, "tcp", cfg.visIP, cfg.visPort2);
-        if doRec, recording_write(rec.fid2, val); end
+        if doRec, recording_write(rec.fid2, val2); end
     end
 
     drawnow limitrate nocallbacks;
