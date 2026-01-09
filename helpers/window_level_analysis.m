@@ -1,20 +1,14 @@
 % ============================
-% window_level_analysis_vFinal_Revised_FIXED_LASSO.m
+% window_level_analysis_vFinal_Revised_FIXED_LASSO_HEATMAP.m
 % ============================
 % Fixed & Optimized EEG Classification (Fixed vs Improv)
 %
-% FIXES APPLIED:
-% 1) Uses aligned per-window storage (pHat/yHat) indexed to Tw rows (no mismatch bugs)
-% 2) Removes broken segment report based on pAll indexing
-% 3) Uses Regularized Logistic Regression (LASSO) inside each LOSO fold
-% 4) Fold-wise orientation check (no manual forced flip)
-% 5) Window-level + Segment-level metrics computed from aligned arrays
-% 6) Top/Bottom files computed from per-file mean prob (no duplicates)
-% 7) Feature-importance plot uses a global LASSO model (oriented for interpretability)
-%
-% NOTES:
-% - Requires Statistics and Machine Learning Toolbox (lassoglm)
-% - Assumes eeg_get_data_path exists and EEGLAB is on path
+% FEATURES:
+% - Aligned per-window storage
+% - LASSO Regularization
+% - Subject-Specific Pipelines
+% - "Cognitive Barcode" Visualization (Confidence Heatmaps)
+% - Realtime Model Export
 
 clear; clc; close all;
 eeglab; %#ok<*NOPTS>
@@ -112,11 +106,11 @@ for k = 1:numel(subjectsToRun)
 
     TwS = Tw(Tw.subject == sRun, :);
 
+    % Pass GT and Global Settings into the pipeline
     run_subject_pipeline(TwS, char(sRun), featCols, ...
-        AlphaVal, NUM_LAMBDA, INNER_CV_FOLDS, MIN_TRAIN_N, MIN_CLASS_N);
+        AlphaVal, NUM_LAMBDA, INNER_CV_FOLDS, MIN_TRAIN_N, MIN_CLASS_N, ...
+        GT, baseDir, winSec, hopSec, trimEdgeSec, bands, fFitRange);
 end
-
-
 
 
 %% ============================
@@ -216,32 +210,6 @@ feats.rms = median(rmsCh, 'omitnan');
 feats.timeKurt = median(kurtosis(X, 0, 2), 'omitnan');
 end
 
-function [X, y, muS, sdS] = build_xy_subjectnorm(Tw, featCols)
-subs = unique(Tw.subject);
-X = []; y = [];
-muS = struct(); sdS = struct();
-
-for i = 1:numel(subs)
-    s = subs(i);
-    idx = (Tw.subject == s);
-
-    Xi = Tw{idx, featCols};
-    yi = double(Tw.label(idx) == "improv");
-
-    mu = mean(Xi, 1, 'omitnan');
-    sd = std(Xi, 0, 1, 'omitnan') + eps;
-
-    Xi = (Xi - mu) ./ sd;
-
-    good = all(isfinite(Xi),2) & isfinite(yi);
-    X = [X; Xi(good,:)]; %#ok<AGROW>
-    y = [y; yi(good)]; %#ok<AGROW>
-
-    muS.(matlab.lang.makeValidName(char(s))) = mu;
-    sdS.(matlab.lang.makeValidName(char(s))) = sd;
-end
-end
-
 function s = spectral_slope(P, f, fr)
 idx = (f >= fr(1)) & (f <= fr(2));
 ff = f(idx);
@@ -288,32 +256,30 @@ else
 end
 end
 
-% ====== Finale plotting using LASSO weights ======
-function plot_finale_prob_traces_lasso(segDir, subj, winSec, hopSec, trimEdgeSec, ...
-    bands, fFitRange, badChLauren, badChJacob, featCols, muS, sdS, betaVec, GT)
+% ====== COGNITIVE BARCODE (HEATMAP) VISUALIZATION ======
+function plot_finale_heatmap(segDir, subj, winSec, hopSec, trimEdgeSec, ...
+    bands, fFitRange, badCh, featCols, mu, sd, betaVec, GT)
 
+% Find finale/mixed files
 files = [dir(fullfile(segDir, '*finale*.set')); dir(fullfile(segDir, '*mixed*.set'))];
-if isempty(files), return; end
+if isempty(files)
+    fprintf('  No finale/mixed files found for heatmap in %s\n', segDir);
+    return;
+end
 
-key = matlab.lang.makeValidName(char(subj));
-mu = muS.(key);
-sd = sdS.(key);
-
-figure('Name', subj + " P(improv) (LASSO)", 'Color', 'w');
+figure('Name', subj + " Cognitive Barcode", 'Color', 'w', 'Position', [100 100 1200 600]);
 
 for i = 1:numel(files)
     fname = files(i).name;
-
     EEG = pop_loadset('filename', fname, 'filepath', files(i).folder);
     EEG = eeg_checkset(EEG);
     if EEG.trials > 1, EEG = eeg_epoch2continuous(EEG); end
 
-    if strcmpi(subj, "Lauren"), badCh = badChLauren; else, badCh = badChJacob; end
-    if ~isempty(badCh), badCh = badCh(badCh<=EEG.nbchan); end
-    if ~isempty(badCh), EEG = pop_select(EEG,'nochannel',badCh); end
+    if ~isempty(badCh), bC = badCh(badCh<=EEG.nbchan); EEG = pop_select(EEG,'nochannel',bC); end
 
     X = double(EEG.data); fs = EEG.srate; X = X - mean(X,2);
 
+    % Extract Windows
     winN = max(8, round(winSec*fs));
     hopN = max(1, round(hopSec*fs));
     startSamp = 1 + round(trimEdgeSec*fs);
@@ -325,36 +291,47 @@ for i = 1:numel(files)
     F = zeros(numel(wStarts), numel(featCols));
     tt = zeros(numel(wStarts),1);
 
+    % Compute features
     for w = 1:numel(wStarts)
-        a = wStarts(w);
-        b = a + winN - 1;
+        a = wStarts(w); b = a + winN - 1;
         feats = compute_features(X(:,a:b), fs, bands, fFitRange);
-
         F(w,:) = [feats.theta, feats.alpha, feats.beta, feats.alphaFrac, feats.betaAlpha, feats.hfFrac, ...
             feats.specKurt, feats.specSlope, feats.rms, feats.timeKurt];
-
         tt(w) = ((a+b)/2)/fs;
     end
 
+    % Normalize & Predict
     Fz = (F - mu) ./ (sd + eps);
-    good = all(isfinite(Fz),2);
+    p = glmval(betaVec, Fz, 'logit');
 
-    p = nan(size(Fz,1),1);
-    if any(good)
-        p(good) = glmval(betaVec, Fz(good,:), 'logit');
-    end
-
+    % --- HEATMAP VISUALIZATION ---
     ax = subplot(numel(files), 1, i);
-    plot(tt, p, 'LineWidth', 1.2);
-    ylim([0 1]); grid on;
-    title(strrep(fname,'_','\_'));
 
+    % Create image matrix (1 row, N columns)
+    % We replicate rows for visual thickness if needed, but here 1 row is fine
+    imagesc(ax, tt, [0 1], p');
+    colormap(ax, hot); % Black=Fixed, Red/Yellow/White=Improv
+    caxis([0 1]);
+
+    % Aesthetics
+    title(strrep(fname,'_','\_'), 'FontSize', 10);
+    yticks([]); ylabel('State');
+    if i == numel(files), xlabel('Time (s)'); end
+
+    % Overlay Ground Truth (Green bars for Improv)
+    hold on;
     gt = get_gt_intervals_for_file(subj, fname, EEG.xmax, GT);
+
+    % Draw thin green boxes around TRUE improv sections
     if ~isempty(gt)
-        overlay_gt(ax, gt);
-    else
-        shade_whole_segment(ax, EEG.xmax, gt_label_from_filename(fname));
+        for k=1:size(gt,1)
+            if gt{k,3} == "improv"
+                rectangle('Position', [gt{k,1}, -0.5, gt{k,2}-gt{k,1}, 2], ...
+                    'EdgeColor', 'g', 'LineWidth', 2, 'LineStyle', '-');
+            end
+        end
     end
+    colorbar;
 end
 end
 
@@ -416,118 +393,10 @@ else
 end
 end
 
-function overlay_gt(ax, i)
-axes(ax); hold on;
-for j=1:size(i,1)
-    if i{j,3}=="fixed"
-        c=[0 0 0];
-    else
-        c=[0 0.6 0];
-    end
-    patch(ax, [i{j,1} i{j,2} i{j,2} i{j,1}], [0 0 1 1], c, ...
-        'FaceAlpha', 0.05, 'EdgeColor', 'none');
-end
-hold off;
-end
-
-function shade_whole_segment(ax, d, gt)
-axes(ax); hold on;
-if gt=="fixed"
-    c=[0 0 0];
-elseif gt=="improv"
-    c=[0 0.6 0];
-else
-    return;
-end
-patch(ax, [0 d d 0], [0 0 1 1], c, 'FaceAlpha', 0.05, 'EdgeColor', 'none');
-hold off;
-end
-
-
-function export_realtime_model_subject(Tw, featCols, subj, AlphaVal, NUM_LAMBDA, CVFolds, outFile)
-% EXPORT_REALTIME_MODEL_SUBJECT
-% Trains a logistic LASSO model for ONE subject (or ALL) using RAW features,
-% saves mu/sd for realtime z-scoring + betaVec for probability.
-%
-% subj:
-%   "Jacob" | "Lauren" | "ALL"
-%
-% Output .mat:
-%   betaVec (11x1), muFeat (1x10), sdFeat (1x10),
-%   modelInfo, featureOrder, subj
-
-% ---- pick rows ----
-if upper(string(subj)) == "ALL"
-    T = Tw;
-else
-    T = Tw(Tw.subject == subj, :);
-end
-
-% Keep only fixed/improv
-T = T(ismember(lower(T.label), ["fixed","improv"]), :);
-
-Xraw = T{:, featCols};
-yraw = double(T.label == "improv");
-
-good = all(isfinite(Xraw), 2) & isfinite(yraw);
-Xraw = Xraw(good, :);
-yraw = yraw(good);
-
-if numel(yraw) < 200
-    warning('[%s] Not enough windows (%d) to train/export %s', subj, numel(yraw), outFile);
-    return;
-end
-if numel(unique(yraw)) < 2
-    warning('[%s] Only one class present. Skipping export %s', subj, outFile);
-    return;
-end
-
-% ---- z-score stats (saved for realtime) ----
-muFeat = mean(Xraw, 1, 'omitnan');
-sdFeat = std(Xraw, 0, 1, 'omitnan') + eps;
-
-Xz = (Xraw - muFeat) ./ sdFeat;
-
-% ---- fit LASSO logistic ----
-[Bexp, FitExp] = lassoglm(Xz, yraw, 'binomial', ...
-    'Alpha', AlphaVal, ...
-    'NumLambda', NUM_LAMBDA, ...
-    'CV', CVFolds, ...
-    'Standardize', false);
-
-idxLam = FitExp.IndexMinDeviance;   % best prob-quality typically
-% idxLam = FitExp.Index1SE;        % more sparse, can collapse to ~0.5
-
-beta0 = FitExp.Intercept(idxLam);
-beta  = Bexp(:, idxLam);
-betaVec = [beta0; beta];
-
-% ---- orient so higher prob = improv ----
-pTrain = glmval(betaVec, Xz, 'logit');
-
-% If improv has LOWER mean prob than fixed, flip coefficients => p becomes 1-p
-if mean(pTrain(yraw==1), 'omitnan') < mean(pTrain(yraw==0), 'omitnan')
-    betaVec = -betaVec;
-    pTrain  = 1 - pTrain;
-end
-
-fprintf('[%s] Export sanity: mean p(improv) GT=improv: %.3f | GT=fixed: %.3f | N=%d\n', ...
-    subj, mean(pTrain(yraw==1), 'omitnan'), mean(pTrain(yraw==0), 'omitnan'), numel(yraw));
-
-modelInfo = struct();
-modelInfo.featureOrder = string(featCols);
-modelInfo.AlphaVal     = AlphaVal;
-modelInfo.lambda       = FitExp.Lambda(idxLam);
-modelInfo.dateSaved    = datestr(now);
-modelInfo.subject      = string(subj);
-
-featureOrder = string(featCols);
-
-save(outFile, 'betaVec', 'muFeat', 'sdFeat', 'modelInfo', 'featureOrder', 'subj');
-end
-
-function run_subject_pipeline(TwS, subjName, featCols, AlphaVal, NUM_LAMBDA, INNER_CV_FOLDS, MIN_TRAIN_N, MIN_CLASS_N)
-% Runs LOSO, prints diagnostics, and exports a realtime model for ONE subject.
+% --- SUBJECT PIPELINE ---
+function run_subject_pipeline(TwS, subjName, featCols, AlphaVal, NUM_LAMBDA, INNER_CV_FOLDS, MIN_TRAIN_N, MIN_CLASS_N, ...
+    GT, baseDir, winSec, hopSec, trimEdgeSec, bands, fFitRange)
+% Runs LOSO, prints diagnostics, visualizes HEATMAP, and exports model.
 
 % --- Safety: ensure only fixed/improv and enough data ---
 TwS = TwS(ismember(lower(TwS.label), ["fixed","improv"]), :);
@@ -540,7 +409,6 @@ for ii = 1:numel(U)
     n  = sum(TwS.file==f);
     fprintf('  %-30s  label=%s  windows=%d\n', f, lab, n);
 end
-
 
 fprintf('Windows: %d | Fixed: %d | Improv: %d\n', height(TwS), sum(TwS.label=="fixed"), sum(TwS.label=="improv"));
 
@@ -610,7 +478,6 @@ for si = 1:numel(uSeg)
     teIdxAll = find(isTest);          % indices of Te rows within TwS
     teIdx    = teIdxAll(goodTe(:));   % keep only the good windows
 
-
     if isempty(Xte0)
         continue;
     end
@@ -643,36 +510,27 @@ for si = 1:numel(uSeg)
         beta0  = FitInfo.Intercept(idxLam);
         beta   = B(:, idxLam);
 
-        pTr  = glmval([beta0; beta], Xtr, 'logit');
-        pRaw = glmval([beta0; beta], Xte, 'logit');
+        pTr  = glmval([beta0; beta], Xtr, 'logit');   % train probs
+        pRaw = glmval([beta0; beta], Xte, 'logit');   % test probs
 
-        % --- Orientation: FORCE "higher p = improv" using TRAIN class means ---
-        m1 = mean(pTr(ytr==1), 'omitnan');  % improv
-        m0 = mean(pTr(ytr==0), 'omitnan');  % fixed
-        doFlip = (m1 < m0);
+        % --- robust orientation by TRAIN AUC ---
+        [~,~,~,auc] = perfcurve(ytr, pTr, 1);
 
-        pImprov = pRaw;
-        if doFlip
+        if ~isfinite(auc), auc = 0.5; end
+
+        if auc < 0.5
             pImprov = 1 - pRaw;
+            flipped = 1;
+        else
+            pImprov = pRaw;
+            flipped = 0;
         end
 
-        % --- Extra safeguard (rare): if still reversed on TRAIN after flip, flip again ---
-        pTr  = glmval([beta0; beta], Xtr, 'logit');
-        pRaw = glmval([beta0; beta], Xte, 'logit');
+        m1 = mean(pTr(ytr==1), 'omitnan');  % improv mean (raw)
+        m0 = mean(pTr(ytr==0), 'omitnan');  % fixed mean  (raw)
 
-        m1 = mean(pTr(ytr==1),'omitnan');
-        m0 = mean(pTr(ytr==0),'omitnan');
-        flip = m1 < m0;
-
-        if flip
-            pRaw = 1 - pRaw;
-        end
-        pImprov = pRaw;
-
-        fprintf('[%s fold %d/%d] train mean p: improv=%.3f fixed=%.3f flip=%d\n', ...
-            subjName, si, numel(uSeg), max(m1,m0), min(m1,m0), flip);
-
-
+        % fprintf('[%s fold %d/%d] train mean raw: improv=%.3f fixed=%.3f | auc=%.3f | flip=%d\n', ...
+        %    subjName, si, numel(uSeg), m1, m0, auc, flipped);
 
     catch
         skip_fitFail = skip_fitFail + 1;
@@ -699,26 +557,33 @@ if ~any(good)
     return;
 end
 
-pred = pHat(good) >= 0.5;
-acc  = mean(pred == yHat(good));
-tpr  = mean(pred(yHat(good)==1) == 1);
-tnr  = mean(pred(yHat(good)==0) == 0);
-bacc = 0.5*(tpr + tnr);
+% --- base metrics ---
+pred    = pHat(good) >= 0.5;
+acc     = mean(pred == yHat(good));
+accFlip = mean((~pred) == yHat(good));   % class inversion
 
-% --- global flip sanity ---
-accFlip = mean((~pred) == yHat(good));
+% --- optional subject-level flip (only if it truly helps) ---
+if accFlip > acc
+    fprintf('[%s] Applying SUBJECT-LEVEL FLIP (accFlip > acc)\n', subjName);
+    pHat(good) = 1 - pHat(good);
+
+    pred    = pHat(good) >= 0.5;
+    acc     = mean(pred == yHat(good));
+    accFlip = mean((~pred) == yHat(good));
+end
+
+% --- compute TPR/TNR/BACC AFTER final pred ---
+tpr  = mean(pred(yHat(good)==1) == 1);   % sensitivity (improv)
+tnr  = mean(pred(yHat(good)==0) == 0);   % specificity (fixed)
+bacc = 0.5 * (tpr + tnr);
+
 fprintf('ACC normal=%.2f%% | flipped=%.2f%%\n', 100*acc, 100*accFlip);
-
-
 
 pFixed  = mean(pHat(good & yHat==0), 'omitnan');
 pImprov = mean(pHat(good & yHat==1), 'omitnan');
 fprintf('Mean predicted p(improv): GT=fixed %.3f | GT=improv %.3f\n', pFixed, pImprov);
 
-
-
 fprintf('Predicted class rate: improv=%.2f fixed=%.2f\n', mean(pred==1), mean(pred==0));
-
 fprintf('Accuracy: %.2f%%\n', 100*acc);
 fprintf('TPR (Improv): %.2f | TNR (Fixed): %.2f | Balanced Acc: %.2f%%\n', tpr, tnr, 100*bacc);
 
@@ -762,23 +627,6 @@ fprintf('ACCURACY:       %.2f%%\n', accSeg);
 fprintf('----------------------------------------\n');
 
 %% ============================
-% TOP/BOTTOM FILES
-%% ============================
-fprintf('\n--- TOP/BOTTOM FILES BY MEAN P(improv) (%s) ---\n', subjName);
-
-T = table(TwS.file, pHat, 'VariableNames', {'file','pHat'});
-T = T(isfinite(T.pHat),:);
-G = groupsummary(T, 'file', 'mean', 'pHat'); % mean_pHat
-G = sortrows(G, 'mean_pHat', 'descend');
-
-fprintf('\nHighest mean P(improv):\n');
-disp(G.file(1:min(5,height(G))));
-
-Gasc = sortrows(G, 'mean_pHat', 'ascend');
-fprintf('\nLowest mean P(improv):\n');
-disp(Gasc.file(1:min(5,height(Gasc))));
-
-%% ============================
 % FEATURE IMPORTANCE (GLOBAL LASSO ON THIS SUBJECT)
 %% ============================
 fprintf('\n--- FEATURE WEIGHTS (GLOBAL LASSO, %s) ---\n', subjName);
@@ -816,6 +664,23 @@ bar(betaVec(2:end));
 xticks(1:numel(featCols)); xticklabels(featCols); xtickangle(45);
 ylabel('Coefficient Weight'); grid on;
 title(sprintf('Oriented Coefficients (%s): Positive => Improv', subjName));
+
+%% ============================
+% FINALE HEATMAP (COGNITIVE BARCODE)
+%% ============================
+fprintf('\n--- GENERATING FINALE HEATMAPS (%s) ---\n', subjName);
+
+if strcmpi(subjName, "Lauren")
+    sDir = fullfile(baseDir, 'segments_Lauren');
+    bCh  = [32];
+else
+    sDir = fullfile(baseDir, 'segments_Jacob');
+    bCh  = [1 8];
+end
+
+plot_finale_heatmap(sDir, subjName, winSec, hopSec, trimEdgeSec, ...
+    bands, fFitRange, bCh, featCols, muFeat, sdFeat, betaVec, GT);
+
 
 %% ============================
 % EXPORT SUBJECT REALTIME MODEL
