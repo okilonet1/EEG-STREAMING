@@ -50,7 +50,7 @@ function bv_gsrcs2_terminal()
 clc;
 
 %% ========= CONFIG (EDIT THESE) =========
-RCS_IP   = "192.168.50.209";
+RCS_IP   = "192.168.50.216";
 RCS_PORT = 6700;
 
 fprintf("Connecting to RCS2 at %s:%d ...\n", RCS_IP, RCS_PORT);
