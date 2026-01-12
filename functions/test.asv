@@ -1,0 +1,7 @@
+rcs = tcpclient("192.168.50.209", 6700, "Timeout", 2);
+
+disp("AP => " + rcs_send(rcs,"AP",true)); % try CRLF
+% disp("START => " + rcs_send(rcs,"START",true));
+
+pause(0.3);
+disp("GETSTATUS => " + rcs_send(rcs,"GETSTATUS",true));
